@@ -28,8 +28,7 @@
     ],
     "require": {
         "php": ">=8.2",
-        "ext-curl": "*",
-        "tecnickcom/tc-lib-pdf": "^8"
+        "ext-curl": "*"
     },
     "require-dev": {
         "pdepend/pdepend": "^2.16",
