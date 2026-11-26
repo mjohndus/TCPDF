@@ -71,7 +71,36 @@ if (!defined('K_TCPDF_LIB_PDF_PATH')) {
 }
 
 if (!defined('K_PATH_FONTS')) {
-    define('K_PATH_FONTS', K_PATH_MAIN . 'vendor/tecnickcom/tc-lib-pdf-font/target/fonts/');
+    $tcpdf_fonts_dirs = [];
+    if (class_exists('Composer\InstalledVersions', false)) {
+        try {
+            $tcpdf_fonts_pkg = Composer\InstalledVersions::getInstallPath('tecnickcom/tc-lib-pdf-font');
+            if (is_string($tcpdf_fonts_pkg) && $tcpdf_fonts_pkg !== '') {
+                $tcpdf_fonts_dirs[] = rtrim($tcpdf_fonts_pkg, '/\\') . '/target/fonts/';
+            }
+        } catch (Throwable) {
+            // tc-lib-pdf-font is not installed through Composer
+        }
+    }
+
+    // TCPDF as the root project: the package is under its own vendor directory.
+    $tcpdf_fonts_dirs[] = K_PATH_MAIN . 'vendor/tecnickcom/tc-lib-pdf-font/target/fonts/';
+    // TCPDF as a dependency: the package is a sibling in the same vendor directory.
+    $tcpdf_fonts_dirs[] = dirname(K_PATH_MAIN) . '/tc-lib-pdf-font/target/fonts/';
+
+    $tcpdf_fonts_path = $tcpdf_fonts_dirs[0];
+    foreach ($tcpdf_fonts_dirs as $tcpdf_fonts_dir) {
+        if (!@is_dir($tcpdf_fonts_dir)) {
+            continue;
+        }
+
+        // Canonical path: the file helper rejects paths with '..' segments,
+        // which Composer\InstalledVersions::getInstallPath() may return.
+        $tcpdf_fonts_real = realpath($tcpdf_fonts_dir);
+        $tcpdf_fonts_path = $tcpdf_fonts_real !== false ? rtrim($tcpdf_fonts_real, '/\\') . '/' : $tcpdf_fonts_dir;
+        break;
+    }
+    define('K_PATH_FONTS', $tcpdf_fonts_path);
 }
 
 if (!defined('K_PATH_URL')) {
@@ -261,11 +290,15 @@ if (!defined('K_TIMEZONE')) {
 // asset directories readable.
 // ----------------------------------------------------------------------------
 
-// Additional trusted local directories the library may read files from.
+// Additional trusted local directories the library may read files from, and
+// write to for the Output() 'F', 'FI' and 'FD' destinations.
 // Array of absolute path prefixes, merged on top of the built-in defaults
 // (system temp dir, K_PATH_MAIN, the bundled vendor dir, the working
 // directory, K_PATH_FONTS, K_PATH_IMAGES and the running script directory).
 // The built-in defaults are always included; this only ever widens access.
+// Must be defined before this file is loaded. Entries that do not resolve to
+// an existing directory are ignored. Listing the system temp dir also allows
+// HTML, CSS and SVG markup to read from it.
 if (!defined('K_ALLOWED_PATHS')) {
     define('K_ALLOWED_PATHS', []);
 }

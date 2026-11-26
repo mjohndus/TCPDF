@@ -35,7 +35,7 @@ It has been widely used across many PHP stacks and still provides a complete fea
 
 ## Architecture: Compatibility Facade over tc-lib-pdf
 
-Starting with this version, the `TCPDF` class no longer contains its own PDF engine.
+Starting with version 7, the `TCPDF` class no longer contains its own PDF engine.
 It is a **compatibility facade**: every public TCPDF method is a thin wrapper that
 delegates the actual PDF generation to the modern `tecnickcom/tc-lib-pdf` engine
 (`\Com\Tecnick\Pdf\Tcpdf`), while a small internal state layer reproduces the legacy
@@ -44,9 +44,10 @@ breaks, headers/footers).
 
 What this means in practice:
 
-- **The public API is unchanged.** All 291 public method signatures (names, parameters,
+- **The public API is (mostly) unchanged.** All 291 public method signatures (names, parameters,
   defaults) are identical to legacy TCPDF; existing integrations keep calling `new TCPDF(...)`,
-  `AddPage()`, `SetFont()`, `Cell()`, `writeHTML()`, `Output()` exactly as before.
+  `AddPage()`, `SetFont()`, `Cell()`, `writeHTML()`, `Output()` exactly as before. One method is
+  new: `getPDFFilename()` returns the file name `Output()` used, which the engine sanitizes.
 - **Rendering is done by the modern engine.** Text layout, HTML/CSS, fonts, graphics,
   barcodes, encryption, signatures and output generation come from the `tc-lib-*` libraries.
 - **Per-method delegation status is documented.** See [MAPPING.md](MAPPING.md) for the
@@ -99,7 +100,38 @@ How to migrate custom font usage:
 3. Keep using `SetFont()`/`AddFont()` from TCPDF, but validate that each custom family resolves from tc-lib assets or from your explicit font path.
 4. Update deployment packaging so `vendor/` font assets are shipped in production.
 
-Font generation procedure (Makefile):
+Font generation procedure:
+
+Font assets are generated at install time and are not shipped in the package. Composer runs the scripts declared by the root project only, so a project that requires TCPDF as a dependency must run the generation itself.
+
+In a project that requires TCPDF, add the step to its own `composer.json`:
+
+```json
+{
+  "scripts": {
+    "tc-lib-pdf-fonts": [
+      "[ -d vendor/tecnickcom/tc-lib-pdf-font ] && make -C vendor/tecnickcom/tc-lib-pdf-font deps fonts || true"
+    ],
+    "post-install-cmd": [
+      "@tc-lib-pdf-fonts"
+    ],
+    "post-update-cmd": [
+      "@tc-lib-pdf-fonts"
+    ],
+    "post-autoload-dump": [
+      "@tc-lib-pdf-fonts"
+    ]
+  }
+}
+```
+
+This covers `composer install`, `composer update`, `composer require` and `composer dump-autoload`. To generate them once instead, run the build from the project root:
+
+```bash
+make -C vendor/tecnickcom/tc-lib-pdf-font deps fonts
+```
+
+In a checkout of this repository, use the Makefile targets:
 
 1. Run `make deps` to install Composer dependencies and initialize tc-lib font assets.
 2. Run `make fonts` to initialize fonts only when missing.
@@ -109,9 +141,11 @@ Expected generated asset sentinel:
 
 - `vendor/tecnickcom/tc-lib-pdf-font/target/fonts/core/helvetica.json`
 
+A missing asset directory is reported as `unable to read file: helvetica.json` on the first page. The full font documentation is at [tcpdf.org/docs/fonts](https://tcpdf.org/docs/fonts/).
+
 Compatibility notes:
 
-- TCPDF checks configured font paths and tc-lib font assets.
+- TCPDF searches `K_PATH_FONTS` first, then the tc-lib font assets; a font in `K_PATH_FONTS` takes precedence over a tc-lib font with the same name.
 - JSON font descriptors from tc-lib are accepted by the TCPDF `AddFont()` path.
 - Legacy PHP font descriptors (`fontname.php` + `fontname.z`) are **no longer supported**
   (see "Breaking Changes" below); convert the original TTF/OTF with the
@@ -122,8 +156,9 @@ Example:
 ```php
 require __DIR__.'/vendor/autoload.php';
 
-// Optional: override only if you need a non-default path.
-define('K_PATH_FONTS', __DIR__.'/vendor/tecnickcom/tc-lib-pdf-font/target/fonts/');
+// Optional: TCPDF resolves the installed tc-lib-pdf-font package on its own.
+// Define the constant only to use font assets from another directory.
+define('K_PATH_FONTS', '/opt/app/fonts/');
 
 $pdf->SetFont('helvetica', '', 11);
 ```
@@ -139,6 +174,7 @@ Safe migration checklist:
 
 ### Why Migrate to tc-lib-pdf
 
+- Larger feature set: tc-lib-pdf offers many more features than TCPDF, and it is where new ones are added.
 - Modern architecture: modular libraries and cleaner component boundaries improve maintainability.
 - Better extensibility: new features are easier to add without patching a monolithic legacy core.
 - Stronger tooling fit: modern package structure works better with static analysis, CI, and automated tests.
@@ -183,6 +219,14 @@ following areas. Each is a deliberate, documented contract change:
    allowlist of trusted directories and remote (HTTP/HTTPS) reads are disabled by default.
    The legacy `setAllowLocalFiles()` toggle no longer widens access; the policy is driven
    by configuration constants instead (see [Resource Loading Security](#resource-loading-security)).
+6. **`<tcpdf>` barcode tags are laid out as HTML boxes.** With `K_TCPDF_CALLS_IN_HTML`
+   enabled, `write1DBarcode()` and `write2DBarcode()` tags are drawn as boxes in the HTML
+   flow, so they can be placed in table cells, lists and inline text. The `$align`
+   parameter `T`, `M` or `B` gives an inline box aligned to the top, middle or bottom of
+   the line; other values give a block box. The style `position` `L`, `C` or `R` aligns
+   the box in its containing block instead of the page. Other allowed methods run at the
+   tag position. A `serializeTCPDFtag()` payload is valid only for the document that
+   created it.
 
 Smaller deliberate no-ops (disk caching, `setDocInfoUnicode()`, header XObject template
 caching, vector-image rasterization toggles, ...) are listed with their reasons in
@@ -203,11 +247,18 @@ configurable via `define()` constants (read by `tcpdf_autoconfig.php`, overridab
 | `K_CURLOPTS` | `array` | `[]` | Extra `CURLOPT_* => value` pairs merged over the cURL defaults. |
 
 **Local reads.** The built-in allowlist always covers the system temp directory,
-`K_PATH_MAIN`, the bundled `vendor/tecnickcom/` directory, the current working directory,
-`K_PATH_FONTS`, `K_PATH_IMAGES` and the running script's directory. `K_ALLOWED_PATHS`
+`K_PATH_MAIN`, the current working directory, `K_PATH_FONTS`, `K_PATH_IMAGES` and the
+running script's directory. `K_ALLOWED_PATHS`
 only ever *widens* this set — paths are resolved with `realpath()`, so non-existent or
 unresolvable entries are silently ignored and traversal/symlink tricks collapse to their
 canonical prefix. There is no way to read below the built-in roots.
+Resources referenced by HTML, CSS and SVG markup (`writeHTML()`, `writeHTMLCell()`)
+use the same list without the system temp directory; list the temp directory in
+`K_ALLOWED_PATHS` to allow markup to read from it.
+The engine reads the files it ships with on its own: the sRGB ICC profile used for PDF/A
+and `setSRGBmode(true)`, and the fonts in the tc-lib-pdf-font package directories. Each
+is read through a file helper limited to those files, so `K_ALLOWED_PATHS` never needs to
+list `vendor/`, and the allowlist above is not widened.
 
 **Remote reads.** Remote URL loading is **off by default** — the single most important
 defense against SSRF when rendering untrusted HTML/markup. To opt in, list the exact
